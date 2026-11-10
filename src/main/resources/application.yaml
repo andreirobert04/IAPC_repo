@@ -1,0 +1,51 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: demo
+  threads:
+    virtual:
+      enabled: true
+  ai:
+    vectorstore:
+      qdrant:
+        host: localhost
+        port: 6334
+        use-tls: false
+        collection-name: rag_documents
+        initialize-schema: true
+
+    ollama:
+      base-url: http://localhost:11434
+      chat:
+        options:
+          model: qwen2.5:1.5b
+      embedding:
+        options:
+          model: nomic-embed-text:latest
+
+app:
+  rag:
+    force-rebuild: true
+    top-k: 20
+    similarity-threshold: 0.0
+    chunk:
+      size: 100
+      min-chunk-size: 200
+      min-chunk-to-embed: 50
+      max-num-chunks: 8192
+      keep-separator: true
+    pdf:
+      mode: page #paragraph
+      path: classpath:rag/qa-over-internal-docs/*.pdf #file:/Users/Shared/rag-files/qa-over-internal-docs/*.pdf
+      pages-per-document: 1
+      left-alignment: true
+      number-of-top-text-lines-to-delete: 0
+      number-of-bottom-text-lines-to-delete: 0
+
+logging:
+  level:
+    root: info
+    com.genai.first.demo: info
+    org.springframework.ai: info
