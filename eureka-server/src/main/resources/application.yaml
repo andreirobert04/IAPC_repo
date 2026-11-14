@@ -1,0 +1,15 @@
+server:
+  port: 8761
+
+spring:
+  application:
+    name: eureka-server
+
+eureka:
+  client:
+    # The registry itself does not register with or fetch from another registry
+    register-with-eureka: false
+    fetch-registry: false
+  server:
+    # Faster removal of stopped services during local development
+    enable-self-preservation: false

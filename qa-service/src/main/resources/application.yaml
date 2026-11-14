@@ -1,0 +1,44 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: qa-service
+  threads:
+    virtual:
+      enabled: true
+  ai:
+    vectorstore:
+      qdrant:
+        host: localhost
+        port: 6334
+        use-tls: false
+        collection-name: rag_documents
+        initialize-schema: true
+
+    ollama:
+      base-url: http://localhost:11434
+      chat:
+        options:
+          model: qwen2.5:1.5b
+      embedding:
+        options:
+          model: nomic-embed-text:latest
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+  instance:
+    prefer-ip-address: true
+
+app:
+  rag:
+    top-k: 20
+    similarity-threshold: 0.0
+
+logging:
+  level:
+    root: info
+    com.genai.first.qa: info
+    org.springframework.ai: info
