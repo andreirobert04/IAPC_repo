@@ -76,3 +76,6 @@ src/main/resources/rag/**/vector-store/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Local environment (copy of .env.example)
+.env

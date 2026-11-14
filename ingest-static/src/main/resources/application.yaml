@@ -1,0 +1,64 @@
+# Story 1 - static ingestion.
+# Every value can be overridden with an environment variable (used by docker-compose);
+# the defaults after ":" are for running locally from IntelliJ (working dir = repo root).
+server:
+  port: ${SERVER_PORT:8083}
+
+spring:
+  application:
+    name: ingest-static
+  threads:
+    virtual:
+      enabled: true
+  ai:
+    vectorstore:
+      qdrant:
+        host: ${QDRANT_HOST:localhost}
+        port: ${QDRANT_GRPC_PORT:6334}
+        use-tls: false
+        collection-name: ${QDRANT_COLLECTION:rag_documents}
+        # ingest-static is the ONLY service that creates the collection
+        initialize-schema: true
+
+    ollama:
+      base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+      embedding:
+        options:
+          model: ${EMBEDDING_MODEL:nomic-embed-text:latest}
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8761/eureka/}
+  instance:
+    prefer-ip-address: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+app:
+  rag:
+    force-rebuild: ${APP_FORCE_REBUILD:true}
+    chunk:
+      size: ${APP_CHUNK_SIZE:100}
+      min-chunk-size: 200
+      min-chunk-to-embed: 50
+      max-num-chunks: 8192
+      keep-separator: true
+    pdf:
+      mode: page #paragraph
+      # PDFs live in ./resources at the repo root (mounted read-only at /resources in Docker)
+      path: ${APP_PDF_PATH:file:resources/*.pdf}
+      pages-per-document: 1
+      left-alignment: true
+      number-of-top-text-lines-to-delete: 0
+      number-of-bottom-text-lines-to-delete: 0
+
+logging:
+  level:
+    root: info
+    com.genai.first.ingeststatic: info
+    org.springframework.ai: info

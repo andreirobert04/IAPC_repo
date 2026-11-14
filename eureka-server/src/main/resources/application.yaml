@@ -1,11 +1,13 @@
 server:
-  port: 8761
+  port: ${SERVER_PORT:8761}
 
 spring:
   application:
     name: eureka-server
 
 eureka:
+  instance:
+    hostname: ${EUREKA_HOSTNAME:localhost}
   client:
     # The registry itself does not register with or fetch from another registry
     register-with-eureka: false
@@ -13,3 +15,9 @@ eureka:
   server:
     # Faster removal of stopped services during local development
     enable-self-preservation: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

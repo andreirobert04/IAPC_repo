@@ -19,8 +19,11 @@
 
 	<modules>
 		<module>eureka-server</module>
-		<module>ingestion-service</module>
-		<module>qa-service</module>
+		<module>api-gateway</module>
+		<module>ingest-static</module>
+		<module>ingest-dynamic</module>
+		<module>retrieval-pre</module>
+		<module>retrieval-post</module>
 	</modules>
 
 	<properties>
