@@ -1,0 +1,53 @@
+# Story 4 - retrieval + post-retrieval and grounding.
+# Environment variables override the local defaults (see docker-compose.yml / .env.example).
+server:
+  port: ${SERVER_PORT:8086}
+
+spring:
+  application:
+    name: retrieval-post
+  threads:
+    virtual:
+      enabled: true
+  ai:
+    vectorstore:
+      qdrant:
+        host: ${QDRANT_HOST:localhost}
+        port: ${QDRANT_GRPC_PORT:6334}
+        use-tls: false
+        collection-name: ${QDRANT_COLLECTION:rag_documents}
+        # the collection is created by ingest-static only
+        initialize-schema: false
+
+    ollama:
+      base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+      chat:
+        options:
+          model: ${CHAT_MODEL:qwen2.5:1.5b}
+      embedding:
+        options:
+          model: ${EMBEDDING_MODEL:nomic-embed-text:latest}
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8761/eureka/}
+  instance:
+    prefer-ip-address: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+app:
+  rag:
+    top-k: ${APP_RETRIEVAL_TOP_K:20}
+    similarity-threshold: ${APP_SIMILARITY_THRESHOLD:0.0}
+
+logging:
+  level:
+    root: info
+    com.genai.first.retrievalpost: info
+    org.springframework.ai: info

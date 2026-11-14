@@ -1,0 +1,140 @@
+# Whole system: docker compose up --build -d
+# Startup order: qdrant + eureka-server -> ingest-static (creates the collection) -> the rest.
+# Only the gateway (8080) is public; Eureka and Qdrant are bound to localhost;
+# the services themselves are reachable only through the gateway.
+name: iapc
+
+x-common-env: &common-env
+  EUREKA_URL: http://eureka-server:8761/eureka/
+  QDRANT_HOST: qdrant
+  QDRANT_COLLECTION: ${QDRANT_COLLECTION:-rag_documents}
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+  CHAT_MODEL: ${CHAT_MODEL:-qwen2.5:1.5b}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text:latest}
+
+x-ollama-host: &ollama-host
+  # lets containers reach Ollama running on the host (needed on Linux, harmless on Mac/Windows)
+  - "host.docker.internal:host-gateway"
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "127.0.0.1:6333:6333" # HTTP REST API & Web UI Dashboard
+      - "127.0.0.1:6334:6334" # gRPC API (used by Spring AI)
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  eureka-server:
+    build:
+      context: .
+      dockerfile: eureka-server/Dockerfile
+    environment:
+      EUREKA_HOSTNAME: eureka-server
+    ports:
+      - "127.0.0.1:8761:8761"
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8761/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  ingest-static:
+    build:
+      context: .
+      dockerfile: ingest-static/Dockerfile
+    environment:
+      <<: *common-env
+      APP_PDF_PATH: file:/resources/*.pdf
+      APP_FORCE_REBUILD: ${APP_FORCE_REBUILD:-false}
+      APP_CHUNK_SIZE: ${APP_CHUNK_SIZE:-100}
+    volumes:
+      - ./resources:/resources:ro
+    extra_hosts: *ollama-host
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8083/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 600s # first start embeds all the PDFs before the app is up
+      retries: 30
+
+  ingest-dynamic:
+    build:
+      context: .
+      dockerfile: ingest-dynamic/Dockerfile
+    environment:
+      <<: *common-env
+    volumes:
+      - ./resources:/resources:ro
+    extra_hosts: *ollama-host
+    depends_on:
+      ingest-static:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8084/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  retrieval-post:
+    build:
+      context: .
+      dockerfile: retrieval-post/Dockerfile
+    environment:
+      <<: *common-env
+      APP_RETRIEVAL_TOP_K: ${APP_RETRIEVAL_TOP_K:-20}
+      APP_SIMILARITY_THRESHOLD: ${APP_SIMILARITY_THRESHOLD:-0.0}
+    extra_hosts: *ollama-host
+    depends_on:
+      ingest-static:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8086/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  retrieval-pre:
+    build:
+      context: .
+      dockerfile: retrieval-pre/Dockerfile
+    environment:
+      <<: *common-env
+    depends_on:
+      ingest-static:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8085/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: api-gateway/Dockerfile
+    environment:
+      EUREKA_URL: http://eureka-server:8761/eureka/
+    ports:
+      - "8080:8080"
+    depends_on:
+      eureka-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8080/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  qdrant_storage:
