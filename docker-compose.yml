@@ -52,7 +52,8 @@ services:
       <<: *common-env
       APP_PDF_PATH: file:/resources/*.pdf
       APP_FORCE_REBUILD: ${APP_FORCE_REBUILD:-false}
-      APP_CHUNK_SIZE: ${APP_CHUNK_SIZE:-100}
+      APP_CHUNK_SIZE: ${APP_CHUNK_SIZE:-400}
+      APP_CHUNK_OVERLAP: ${APP_CHUNK_OVERLAP:-50}
     volumes:
       - ./resources:/resources:ro
     extra_hosts: *ollama-host

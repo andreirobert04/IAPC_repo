@@ -16,11 +16,12 @@ public class RagConfigData {
 
     @Data
     public static class ChunkProperties {
-        private int size;
-        private int minChunkSize;
-        private int minChunkToEmbed;
-        private int maxNumChunks;
-        private boolean keepSeparator;
+        /** max tokens per chunk */
+        private int size = 400;
+        /** tokens repeated from the end of the previous chunk */
+        private int overlap = 50;
+        /** chunks shorter than this many characters are not embedded */
+        private int minChunkLength = 20;
     }
 
     @Data
