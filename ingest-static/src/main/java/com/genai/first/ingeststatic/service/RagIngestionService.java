@@ -6,14 +6,16 @@ import com.genai.first.ingeststatic.config.data.RagConfigData;
 import com.genai.first.ingeststatic.config.data.RagConstants;
 import com.genai.first.ingeststatic.exception.RagException;
 import com.genai.first.ingeststatic.reader.PdfTextPageReader;
+import com.genai.first.ingeststatic.store.ChunkStore;
+import com.genai.first.ingeststatic.store.EmbeddedChunk;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
+import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.ai.reader.ExtractedTextFormatter;
 import org.springframework.ai.reader.pdf.PagePdfDocumentReader;
 import org.springframework.ai.reader.pdf.ParagraphPdfDocumentReader;
 import org.springframework.ai.reader.pdf.config.PdfDocumentReaderConfig;
-import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
 import org.springframework.beans.factory.annotation.Value;
@@ -44,13 +46,19 @@ public class RagIngestionService {
     private final PdfDocumentReaderConfig pdfDocumentReaderConfig;
     private final OverlappingTextSplitter textSplitter;
     private final PdfTextPageReader pdfTextPageReader = new PdfTextPageReader();
+    private final EmbeddingModel embeddingClient;
+    private final ChunkStore chunkStore;
     private final String embeddingModel;
 
     public RagIngestionService(VectorStore vectorStore,
                                RagConfigData ragConfigData,
                                OverlappingTextSplitter textSplitter,
+                               EmbeddingModel embeddingClient,
+                               ChunkStore chunkStore,
                                @Value("${spring.ai.ollama.embedding.options.model:unknown}") String embeddingModel) {
         this.vectorStore = vectorStore;
+        this.embeddingClient = embeddingClient;
+        this.chunkStore = chunkStore;
         this.ragConfigData = ragConfigData;
         RagConfigData.PdfProperties pdfProperties = ragConfigData.getPdf();
         this.pdfDocumentReaderConfig = PdfDocumentReaderConfig.builder()
@@ -69,14 +77,77 @@ public class RagIngestionService {
 
     @PostConstruct
     public void initializeVectorStore() throws RagException {
-        if (skipIngest()) {
-            return;
-        }
         var pdfResources = getResources();
         if (pdfResources == null) {
             return;
         }
-        ingestDocumentChunksToVectorStore(pdfResources);
+        if (ragConfigData.isForceRebuild()) {
+            log.info("force-rebuild=true -> every PDF is re-ingested, even if unchanged");
+        }
+        Map<IngestResult, Integer> results = new java.util.EnumMap<>(IngestResult.class);
+        for (var pdfResource : pdfResources) {
+            results.merge(ingest(pdfResource), 1, Integer::sum);
+        }
+        log.info("Ingestion finished for {} PDF(s): {} (chunk size={} tokens, overlap={} tokens, embedding model={})",
+                pdfResources.length, results, textSplitter.getChunkSize(), textSplitter.getOverlap(), embeddingModel);
+    }
+
+    /**
+     * Ingests one PDF (Story 1, Tasks 1 + 2):
+     * <ol>
+     *     <li>an unchanged file (same checksum as the stored version) is skipped;</li>
+     *     <li>everything that can fail (reading, chunking, embedding) happens in memory first,
+     *     so a failure leaves the stored version untouched;</li>
+     *     <li>the new chunks then replace the old ones in a single store request
+     *     (new chunks written first, old ones deleted after), so a query never gets an empty result.</li>
+     * </ol>
+     * Errors are logged and reported as FAILED, so one bad file does not stop the others.
+     */
+    public IngestResult ingest(Resource pdfResource) {
+        var source = pdfResource.getFilename();
+        try {
+            var docId = DocumentIds.docId(Objects.requireNonNull(source, "PDF resource without a file name"));
+            var checksum = sha256Hex(pdfResource);
+            var stored = chunkStore.find(docId);
+
+            boolean sameContent = stored.isPresent() && checksum.equals(stored.get().checksum());
+            if (sameContent && !ragConfigData.isForceRebuild()) {
+                log.info("Unchanged {} (doc_id={}, version={}, {} chunks) -> skipped",
+                        source, docId, stored.get().version(), stored.get().chunkCount());
+                return IngestResult.UNCHANGED;
+            }
+            int version = stored.map(d -> sameContent ? d.version() : d.version() + 1)
+                    .orElse(RagConstants.INITIAL_VERSION);
+
+            var chunks = buildChunks(pdfResource, version, checksum);
+            if (chunks.isEmpty()) {
+                log.warn("No text extracted from {}, keeping the stored version (if any)", source);
+                return IngestResult.FAILED;
+            }
+            var embedded = embed(chunks);
+            chunkStore.replace(docId, embedded);
+
+            var result = stored.isEmpty() ? IngestResult.NEW : IngestResult.UPDATED;
+            log.info("{} {} -> doc_id={}, version={}, {} chunks{}", result == IngestResult.NEW ? "Ingested" : "Updated",
+                    source, docId, version, chunks.size(),
+                    stored.map(d -> " (previous: version " + d.version() + ", " + d.chunkCount() + " chunks)").orElse(""));
+            return result;
+        } catch (Exception e) {
+            log.error("Ingestion of {} failed, the stored version (if any) is left unchanged: {}", source, e.getMessage(), e);
+            return IngestResult.FAILED;
+        }
+    }
+
+    private List<EmbeddedChunk> embed(List<Document> chunks) {
+        var embeddings = embeddingClient.embed(chunks.stream().map(Document::getText).toList());
+        if (embeddings.size() != chunks.size()) {
+            throw new RagException("Embedding model returned " + embeddings.size() + " vectors for " + chunks.size() + " chunks");
+        }
+        List<EmbeddedChunk> embedded = new ArrayList<>(chunks.size());
+        for (int i = 0; i < chunks.size(); i++) {
+            embedded.add(new EmbeddedChunk(chunks.get(i), embeddings.get(i)));
+        }
+        return embedded;
     }
 
     public void deleteBySource(String source) {
@@ -87,29 +158,6 @@ public class RagIngestionService {
         } catch (Exception e) {
             throw new RagException("Error deleting source: " + source + " from vector store!", e);
         }
-    }
-
-    private boolean skipIngest() {
-        if (ragConfigData.isForceRebuild()) {
-            log.info("force-rebuild=true -> Rebuilding documents in vector store");
-            return false;
-        }
-        try {
-            var existing = vectorStore.similaritySearch(
-                    SearchRequest.builder()
-                            .query("a")
-                            .topK(1)
-                            .similarityThreshold(0.0)
-                            .build()
-            );
-            if (existing != null && !existing.isEmpty()) {
-                log.info("Vector store already populated. Skipping ingest. Set app.rag.force-rebuild=true to rebuild");
-                return true;
-            }
-        } catch (Exception e) {
-            log.debug("Could not verify existing documents count, proceeding with ingest: {}", e.getMessage());
-        }
-        return false;
     }
 
     private Resource[] getResources() {
@@ -127,36 +175,18 @@ public class RagIngestionService {
         }
     }
 
-    private void ingestDocumentChunksToVectorStore(Resource[] pdfResources) {
-        int totalChunks = 0;
-        for (var pdfResource : pdfResources) {
-            var chunks = buildChunks(pdfResource);
-            if (chunks.isEmpty()) {
-                log.warn("No text extracted from {}, nothing to ingest", pdfResource.getFilename());
-                continue;
-            }
-            // chunk ids are deterministic, so Qdrant upserts them: re-running the same file creates no duplicates
-            vectorStore.add(chunks);
-            totalChunks += chunks.size();
-            var first = chunks.get(0).getMetadata();
-            log.info("Ingested {} -> doc_id={}, version={}, {} chunks",
-                    first.get(RagConstants.SOURCE), first.get(RagConstants.DOC_ID),
-                    first.get(RagConstants.VERSION), chunks.size());
-        }
-        log.info("Ingested {} chunks from {} PDF(s) into Qdrant (chunk size={} tokens, overlap={} tokens, embedding model={})",
-                totalChunks, pdfResources.length, textSplitter.getChunkSize(), textSplitter.getOverlap(), embeddingModel);
-    }
-
     /**
      * Reads one PDF and turns it into chunks carrying the full metadata schema:
      * doc_id, version, source, page, chunk_index, checksum (+ embedding_model, doc_type, updated_at).
      * chunk_index runs over the whole document, so neighbouring chunks can be found later.
      */
     List<Document> buildChunks(Resource pdfResource) {
+        return buildChunks(pdfResource, RagConstants.INITIAL_VERSION, sha256Hex(pdfResource));
+    }
+
+    List<Document> buildChunks(Resource pdfResource, int version, String checksum) {
         var source = Objects.requireNonNull(pdfResource.getFilename(), "PDF resource without a file name");
         var docId = DocumentIds.docId(source);
-        var version = RagConstants.INITIAL_VERSION;
-        var checksum = sha256Hex(pdfResource);
         var docType = source.contains(".") ? source.substring(0, source.lastIndexOf('.')) : source;
         var updatedAt = ZonedDateTime.now().toLocalDate().toString();
 

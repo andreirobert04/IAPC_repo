@@ -4,8 +4,10 @@ import com.genai.first.ingeststatic.chunking.OverlappingTextSplitter;
 import com.genai.first.ingeststatic.config.data.RagConfigData;
 import com.genai.first.ingeststatic.config.data.RagConstants;
 import com.genai.first.ingeststatic.exception.RagException;
+import com.genai.first.ingeststatic.store.ChunkStore;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.document.Document;
+import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.core.io.ClassPathResource;
 
@@ -24,7 +26,8 @@ class RagIngestionServiceTest {
         config.getPdf().setMode(RagConstants.TEXT);
         config.getPdf().setPagesPerDocument(1);
         return new RagIngestionService(mock(VectorStore.class), config,
-                new OverlappingTextSplitter(400, 50, 20), "test-embedding-model");
+                new OverlappingTextSplitter(400, 50, 20), mock(EmbeddingModel.class), mock(ChunkStore.class),
+                "test-embedding-model");
     }
 
     @Test
