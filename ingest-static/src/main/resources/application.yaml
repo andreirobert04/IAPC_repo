@@ -43,11 +43,11 @@ app:
   rag:
     force-rebuild: ${APP_FORCE_REBUILD:true}
     chunk:
-      size: ${APP_CHUNK_SIZE:100}
-      min-chunk-size: 200
-      min-chunk-to-embed: 50
-      max-num-chunks: 8192
-      keep-separator: true
+      # structure-aware chunking (lines/sentences), sizes in tokens
+      size: ${APP_CHUNK_SIZE:400}
+      overlap: ${APP_CHUNK_OVERLAP:50}
+      # chunks shorter than this many characters are not embedded
+      min-chunk-length: ${APP_MIN_CHUNK_LENGTH:20}
     pdf:
       mode: page #paragraph
       # PDFs live in ./resources at the repo root (mounted read-only at /resources in Docker)

@@ -1,5 +1,7 @@
 package com.genai.first.ingeststatic.service;
 
+import com.genai.first.ingeststatic.chunking.DocumentIds;
+import com.genai.first.ingeststatic.chunking.OverlappingTextSplitter;
 import com.genai.first.ingeststatic.config.data.RagConfigData;
 import com.genai.first.ingeststatic.config.data.RagConstants;
 import com.genai.first.ingeststatic.exception.RagException;
@@ -10,10 +12,10 @@ import org.springframework.ai.reader.ExtractedTextFormatter;
 import org.springframework.ai.reader.pdf.PagePdfDocumentReader;
 import org.springframework.ai.reader.pdf.ParagraphPdfDocumentReader;
 import org.springframework.ai.reader.pdf.config.PdfDocumentReaderConfig;
-import org.springframework.ai.transformer.splitter.TokenTextSplitter;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.stereotype.Component;
@@ -39,11 +41,13 @@ public class RagIngestionService {
     private final VectorStore vectorStore;
     private final RagConfigData ragConfigData;
     private final PdfDocumentReaderConfig pdfDocumentReaderConfig;
-    private final TokenTextSplitter tokenTextSplitter;
+    private final OverlappingTextSplitter textSplitter;
+    private final String embeddingModel;
 
     public RagIngestionService(VectorStore vectorStore,
                                RagConfigData ragConfigData,
-                               TokenTextSplitter tokenTextSplitter) {
+                               OverlappingTextSplitter textSplitter,
+                               @Value("${spring.ai.ollama.embedding.options.model:unknown}") String embeddingModel) {
         this.vectorStore = vectorStore;
         this.ragConfigData = ragConfigData;
         RagConfigData.PdfProperties pdfProperties = ragConfigData.getPdf();
@@ -57,7 +61,8 @@ public class RagIngestionService {
                                 .build()
                 )
                 .build();
-        this.tokenTextSplitter = tokenTextSplitter;
+        this.textSplitter = textSplitter;
+        this.embeddingModel = embeddingModel;
     }
 
     @PostConstruct
@@ -121,21 +126,58 @@ public class RagIngestionService {
     }
 
     private void ingestDocumentChunksToVectorStore(Resource[] pdfResources) {
-        var documents = getDocuments(pdfResources);
-        var chunks = getChunks(documents);
-        addChunkIndex(chunks);
-        vectorStore.add(chunks);
-        log.info("Ingested {} chunks into Qdrant VectorStore", chunks.size());
+        int totalChunks = 0;
+        for (var pdfResource : pdfResources) {
+            var chunks = buildChunks(pdfResource);
+            if (chunks.isEmpty()) {
+                log.warn("No text extracted from {}, nothing to ingest", pdfResource.getFilename());
+                continue;
+            }
+            // chunk ids are deterministic, so Qdrant upserts them: re-running the same file creates no duplicates
+            vectorStore.add(chunks);
+            totalChunks += chunks.size();
+            var first = chunks.get(0).getMetadata();
+            log.info("Ingested {} -> doc_id={}, version={}, {} chunks",
+                    first.get(RagConstants.SOURCE), first.get(RagConstants.DOC_ID),
+                    first.get(RagConstants.VERSION), chunks.size());
+        }
+        log.info("Ingested {} chunks from {} PDF(s) into Qdrant (chunk size={} tokens, overlap={} tokens, embedding model={})",
+                totalChunks, pdfResources.length, textSplitter.getChunkSize(), textSplitter.getOverlap(), embeddingModel);
     }
 
-    private List<Document> getDocuments(Resource[] pdfResources) {
-        List<Document> documents = new ArrayList<>();
-        for (var pdfResource : pdfResources) {
-            var parts = getDocumentParts(pdfResource);
-            addMetadata(pdfResource, parts);
-            documents.addAll(parts);
+    /**
+     * Reads one PDF and turns it into chunks carrying the full metadata schema:
+     * doc_id, version, source, page, chunk_index, checksum (+ embedding_model, doc_type, updated_at).
+     * chunk_index runs over the whole document, so neighbouring chunks can be found later.
+     */
+    List<Document> buildChunks(Resource pdfResource) {
+        var source = Objects.requireNonNull(pdfResource.getFilename(), "PDF resource without a file name");
+        var docId = DocumentIds.docId(source);
+        var version = RagConstants.INITIAL_VERSION;
+        var checksum = sha256Hex(pdfResource);
+        var docType = source.contains(".") ? source.substring(0, source.lastIndexOf('.')) : source;
+        var updatedAt = ZonedDateTime.now().toLocalDate().toString();
+
+        List<Document> chunks = new ArrayList<>();
+        int chunkIndex = 0;
+        for (var part : getDocumentParts(pdfResource)) {
+            var page = part.getMetadata().getOrDefault(RagConstants.PDF_PAGE_NUMBER, 0);
+            for (var text : textSplitter.split(part.getText())) {
+                Map<String, Object> metadata = new HashMap<>(part.getMetadata());
+                metadata.put(RagConstants.DOC_ID, docId);
+                metadata.put(RagConstants.VERSION, version);
+                metadata.put(RagConstants.SOURCE, source);
+                metadata.put(RagConstants.PAGE, page);
+                metadata.put(RagConstants.CHUNK_INDEX, chunkIndex);
+                metadata.put(RagConstants.CHECKSUM, checksum);
+                metadata.put(RagConstants.EMBEDDING_MODEL, embeddingModel);
+                metadata.put(RagConstants.DOC_TYPE, docType);
+                metadata.put(RagConstants.UPDATED_AT, updatedAt);
+                chunks.add(new Document(DocumentIds.chunkId(docId, version, chunkIndex), text, metadata));
+                chunkIndex++;
+            }
         }
-        return documents;
+        return chunks;
     }
 
     private List<Document> getDocumentParts(Resource pdfResource) {
@@ -144,30 +186,6 @@ public class RagIngestionService {
             case RagConstants.PARAGRAPH -> new ParagraphPdfDocumentReader(pdfResource, pdfDocumentReaderConfig).read();
             default -> new PagePdfDocumentReader(pdfResource, pdfDocumentReaderConfig).read();
         };
-    }
-
-    private void addMetadata(Resource pdfResource, List<Document> parts) {
-        for (var part : parts) {
-            part.getMetadata().putIfAbsent(RagConstants.SOURCE, pdfResource.getFilename());
-            part.getMetadata().putIfAbsent(RagConstants.DOC_TYPE,
-                    Objects.requireNonNull(pdfResource.getFilename()).substring(0, pdfResource.getFilename().indexOf(".")));
-            part.getMetadata().putIfAbsent(RagConstants.UPDATED_AT, ZonedDateTime.now().toLocalDate().toString());
-            var checksum = sha256Hex(pdfResource);
-            part.getMetadata().put(RagConstants.CHECKSUM, checksum);
-        }
-    }
-
-    private List<Document> getChunks(List<Document> documents) {
-        return tokenTextSplitter.apply(documents);
-    }
-
-    private void addChunkIndex(List<Document> chunks) {
-        Map<String, Integer> counters = new HashMap<>();
-        for (var chunk : chunks) {
-            var source = String.valueOf(chunk.getMetadata().getOrDefault(RagConstants.SOURCE, RagConstants.UNKNOWN));
-            var index = counters.merge(source, 1, Integer::sum) - 1;
-            chunk.getMetadata().put(RagConstants.CHUNK_INDEX, index);
-        }
     }
 
     /**
