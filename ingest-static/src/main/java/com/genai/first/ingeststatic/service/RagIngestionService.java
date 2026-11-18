@@ -5,6 +5,7 @@ import com.genai.first.ingeststatic.chunking.OverlappingTextSplitter;
 import com.genai.first.ingeststatic.config.data.RagConfigData;
 import com.genai.first.ingeststatic.config.data.RagConstants;
 import com.genai.first.ingeststatic.exception.RagException;
+import com.genai.first.ingeststatic.reader.PdfTextPageReader;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
@@ -42,6 +43,7 @@ public class RagIngestionService {
     private final RagConfigData ragConfigData;
     private final PdfDocumentReaderConfig pdfDocumentReaderConfig;
     private final OverlappingTextSplitter textSplitter;
+    private final PdfTextPageReader pdfTextPageReader = new PdfTextPageReader();
     private final String embeddingModel;
 
     public RagIngestionService(VectorStore vectorStore,
@@ -182,9 +184,13 @@ public class RagIngestionService {
 
     private List<Document> getDocumentParts(Resource pdfResource) {
         String mode = ragConfigData.getPdf().getMode();
-        return switch (mode != null ? mode.toLowerCase() : "") {
+        return switch (mode != null ? mode.toLowerCase() : RagConstants.TEXT) {
+            // keeps the visual layout (multi-column pages get mixed)
+            case RagConstants.PAGE_LAYOUT -> new PagePdfDocumentReader(pdfResource, pdfDocumentReaderConfig).read();
+            // needs a PDF with a table of contents (bookmarks)
             case RagConstants.PARAGRAPH -> new ParagraphPdfDocumentReader(pdfResource, pdfDocumentReaderConfig).read();
-            default -> new PagePdfDocumentReader(pdfResource, pdfDocumentReaderConfig).read();
+            // default: content-stream order, safe for multi-column pages and tables
+            default -> pdfTextPageReader.read(pdfResource);
         };
     }
 

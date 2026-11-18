@@ -49,7 +49,8 @@ app:
       # chunks shorter than this many characters are not embedded
       min-chunk-length: ${APP_MIN_CHUNK_LENGTH:20}
     pdf:
-      mode: page #paragraph
+      # text (default, content-stream order: safe for tables and multi-column pages) | page (visual layout) | paragraph (needs PDF bookmarks)
+      mode: ${APP_PDF_MODE:text}
       # PDFs live in ./resources at the repo root (mounted read-only at /resources in Docker)
       path: ${APP_PDF_PATH:file:resources/*.pdf}
       pages-per-document: 1

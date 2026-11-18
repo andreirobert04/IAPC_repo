@@ -70,14 +70,57 @@ Each service reads its settings from `application.yaml`; every value can be over
 | `CHAT_MODEL` / `EMBEDDING_MODEL` | `qwen2.5:1.5b` / `nomic-embed-text:latest` | retrieval-post / ingest-static, retrieval-post |
 | `APP_PDF_PATH` | `file:resources/*.pdf` | ingest-static |
 | `APP_FORCE_REBUILD` | `true` locally, `false` in Docker | ingest-static |
-| `APP_CHUNK_SIZE` | `100` | ingest-static |
+| `APP_CHUNK_SIZE` / `APP_CHUNK_OVERLAP` | `400` / `50` (tokens) | ingest-static |
+| `APP_MIN_CHUNK_LENGTH` | `20` (characters) | ingest-static |
+| `APP_PDF_MODE` | `text` (`text` \| `page` \| `paragraph`) | ingest-static |
 | `APP_RETRIEVAL_TOP_K` / `APP_SIMILARITY_THRESHOLD` | `20` / `0.0` | retrieval-post |
 
 No secrets are needed for now; `.env` is git-ignored.
 
+## Static ingestion (Story 1)
+
+### Task 1 – PDF ingestion
+
+Every PDF in `./resources` is read page by page, split into chunks and stored in Qdrant.
+
+**Reading** (`app.rag.pdf.mode`)
+- `text` (default): content-stream order with PDFBox. Multi-column pages keep each column together and table rows stay on one line.
+- `page`: Spring AI `PagePdfDocumentReader` (keeps the visual layout, so columns on the same line get mixed).
+- `paragraph`: Spring AI `ParagraphPdfDocumentReader` (only for PDFs with bookmarks).
+
+**Chunking** (`OverlappingTextSplitter`, structure-aware)
+- The text is cut into lines and sentences, so a chunk never ends inside a word. A line without punctuation is split on word boundaries.
+- At most `APP_CHUNK_SIZE` tokens per chunk; each chunk starts with the last `APP_CHUNK_OVERLAP` tokens of the previous one.
+- Chunks shorter than `APP_MIN_CHUNK_LENGTH` characters are dropped.
+- Changing the chunk size, the overlap or `EMBEDDING_MODEL` requires re-ingesting (delete the collection and restart `ingest-static`).
+
+**Metadata schema of every chunk**
+
+| Field | Meaning |
+|---|---|
+| `doc_id` | stable UUID derived from the file name (same for every version of the file) |
+| `version` | document version (`1` for now; increased by the update process) |
+| `source` | file name |
+| `page` | page number (1-based) |
+| `chunk_index` | position of the chunk in the whole document, from 0 |
+| `checksum` | SHA-256 of the file |
+| `embedding_model` | model used for the embedding |
+
+**No duplicates:** the Qdrant point id is a UUID derived from `doc_id + version + chunk_index`, so ingesting the same file again overwrites the same points.
+
+**Sample set:** `resources/` includes `access_control_matrix.pdf` (table) and `security_newsletter_two_columns.pdf` (two columns).
+
+**Manual check** – random chunks with their metadata:
+```bash
+curl "http://localhost:8083/api/ingestion/chunks/sample?n=20"
+curl "http://localhost:8083/api/ingestion/chunks/sample?n=5&source=security_newsletter_two_columns.pdf"
+```
+
+**Tests:** `mvn -pl ingest-static test` (splitter, ids, metadata schema, table extraction, error cases).
+
 ## Known limitations / next tasks
 
-- `ingest-static` with `force-rebuild: true` re-adds all documents on every start (duplicates) – Story 1, Task 2 (checksum + idempotent re-ingest) fixes this.
+- `ingest-static` re-embeds every file on every start, and if a changed file produces fewer chunks the extra old chunks stay – Story 1, Task 2 (checksum skip + atomic replacement) fixes this.
 - `ingest-dynamic` is only a skeleton (Story 2).
 - `retrieval-pre` only trims the query (Story 3 tasks).
 - Nginx in front of the gateway and JWT authentication (from the project description) are not added yet.

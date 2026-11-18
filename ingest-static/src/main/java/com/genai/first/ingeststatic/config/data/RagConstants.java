@@ -3,6 +3,9 @@ package com.genai.first.ingeststatic.config.data;
 public final class RagConstants {
     private RagConstants() {}
 
+    // app.rag.pdf.mode values
+    public static final String TEXT = "text";
+    public static final String PAGE_LAYOUT = "page";
     public static final String PARAGRAPH = "paragraph";
 
     // metadata schema of every chunk (Story 1, Task 1)
