@@ -69,7 +69,7 @@ Each service reads its settings from `application.yaml`; every value can be over
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | ingest-static, retrieval-post |
 | `CHAT_MODEL` / `EMBEDDING_MODEL` | `qwen2.5:1.5b` / `nomic-embed-text:latest` | retrieval-post / ingest-static, retrieval-post |
 | `APP_PDF_PATH` | `file:resources/*.pdf` | ingest-static |
-| `APP_FORCE_REBUILD` | `true` locally, `false` in Docker | ingest-static |
+| `APP_FORCE_REBUILD` | `false` (unchanged files are skipped) | ingest-static |
 | `APP_CHUNK_SIZE` / `APP_CHUNK_OVERLAP` | `400` / `50` (tokens) | ingest-static |
 | `APP_MIN_CHUNK_LENGTH` | `20` (characters) | ingest-static |
 | `APP_PDF_MODE` | `text` (`text` \| `page` \| `paragraph`) | ingest-static |
@@ -118,9 +118,32 @@ curl "http://localhost:8083/api/ingestion/chunks/sample?n=5&source=security_news
 
 **Tests:** `mvn -pl ingest-static test` (splitter, ids, metadata schema, table extraction, error cases).
 
+### Task 2 – Update process
+
+On every start `ingest-static` compares each PDF with what Qdrant already holds for its `doc_id`:
+
+| Situation | Result | What happens |
+|---|---|---|
+| not stored yet | `NEW` | ingested as `version 1` |
+| same checksum | `UNCHANGED` | skipped (no embedding call) |
+| different checksum | `UPDATED` | ingested as `version + 1`, old chunks removed |
+| any error | `FAILED` | logged; the stored version is left as it was, the other files continue |
+
+The start-up log ends with a summary, e.g. `Ingestion finished for 9 PDF(s): {UPDATED=1, UNCHANGED=8}`.
+
+**How the replacement stays safe** (`QdrantChunkStore.replace`)
+1. Reading, chunking and embedding run first, in memory. If any of them fails, Qdrant is not touched.
+2. Then a single Qdrant batch request runs two operations in order: upsert the new chunks, then delete every other chunk of the same `doc_id` (old version or extra chunks). The new content is always written before the old one is deleted, so a query never gets an empty result; old and new chunks coexist only for the duration of that one request.
+
+Qdrant has no multi-operation transactions, so this is "atomic" in the sense of one request issued after all failure-prone work is done.
+
+`APP_FORCE_REBUILD=true` re-ingests every file even if unchanged (e.g. after changing `EMBEDDING_MODEL` or the chunk size); the version stays the same.
+
+**Tests:** `RagIngestionUpdateTest` uses two versions of `backup_policy.pdf` (3 pages → 1 page): new file, unchanged file skipped, changed file replaced with the expected chunk count, failure while embedding / while storing keeps the previous version, force rebuild.
+
 ## Known limitations / next tasks
 
-- `ingest-static` re-embeds every file on every start, and if a changed file produces fewer chunks the extra old chunks stay – Story 1, Task 2 (checksum skip + atomic replacement) fixes this.
+- A PDF removed from `./resources` keeps its chunks in Qdrant – Story 1, Task 3 (delete process).
 - `ingest-dynamic` is only a skeleton (Story 2).
 - `retrieval-pre` only trims the query (Story 3 tasks).
 - Nginx in front of the gateway and JWT authentication (from the project description) are not added yet.

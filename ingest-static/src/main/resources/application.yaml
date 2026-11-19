@@ -41,7 +41,8 @@ management:
 
 app:
   rag:
-    force-rebuild: ${APP_FORCE_REBUILD:true}
+    # false: unchanged files (same checksum) are skipped; true: re-ingest every file (e.g. after changing the embedding model)
+    force-rebuild: ${APP_FORCE_REBUILD:false}
     chunk:
       # structure-aware chunking (lines/sentences), sizes in tokens
       size: ${APP_CHUNK_SIZE:400}
