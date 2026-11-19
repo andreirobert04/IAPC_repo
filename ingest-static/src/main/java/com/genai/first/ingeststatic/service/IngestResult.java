@@ -10,6 +10,8 @@ public enum IngestResult {
     UPDATED,
     /** same checksum as the stored version: skipped */
     UNCHANGED,
+    /** removed from resources: all chunks deleted by doc_id */
+    DELETED,
     /** reading/chunking/embedding/storing failed: the stored version (if any) is left as it was */
     FAILED
 }

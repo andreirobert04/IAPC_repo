@@ -141,9 +141,37 @@ Qdrant has no multi-operation transactions, so this is "atomic" in the sense of 
 
 **Tests:** `RagIngestionUpdateTest` uses two versions of `backup_policy.pdf` (3 pages → 1 page): new file, unchanged file skipped, changed file replaced with the expected chunk count, failure while embedding / while storing keeps the previous version, force rebuild.
 
+### Task 3 – Delete process
+
+When a PDF is removed from `./resources` or explicitly deleted, all its chunks are removed from Qdrant by `doc_id`, with an immediate post-deletion check to ensure no orphaned vectors remain.
+
+| Situation | Result | What happens |
+|---|---|---|
+| removed from `./resources` | `DELETED` | on startup reconciliation, all chunks of that `doc_id` are deleted; checked for 0 remaining orphans |
+| explicit deletion by `doc_id` / source | – | deletes all chunks matching the document and verifies 0 remaining orphans |
+| orphaned vectors in collection | – | collection-wide scan finds vectors without active `doc_id` and purges them |
+
+**How the delete process stays safe** (`QdrantChunkStore.delete` and orphan checks)
+1. Deletion runs a filtered delete in Qdrant matching `doc_id == docId`.
+2. **Orphaned vectors check:** immediately queries/scrolls Qdrant for any points still carrying that `doc_id`. If any lingering chunks remain (`count > 0`), a `RagException` is thrown to alert to an incomplete deletion.
+3. **Reconciliation on startup:** `initializeVectorStore` compares stored `doc_id`s in Qdrant with active PDFs in `./resources`. Any document no longer present on disk is deleted (`DELETED` in summary), and any orphaned vectors without valid documents are cleaned up.
+
+**Endpoints:**
+```bash
+# delete by stable doc_id
+curl -X DELETE http://localhost:8080/ingest-static/api/ingestion/documents/<doc_id>
+
+# delete by source file name
+curl -X DELETE http://localhost:8080/ingest-static/api/ingestion/sources/backup_policy.pdf
+
+# inspect orphaned vectors across the collection
+curl http://localhost:8080/ingest-static/api/ingestion/orphans
+```
+
+**Tests:** `RagIngestionDeleteTest` (delete by `doc_id`, delete by source, non-existent doc handling, failure handling, simulated orphan detection and exception, startup reconciliation for removed files, orphaned vectors purge).
+
 ## Known limitations / next tasks
 
-- A PDF removed from `./resources` keeps its chunks in Qdrant – Story 1, Task 3 (delete process).
 - `ingest-dynamic` is only a skeleton (Story 2).
 - `retrieval-pre` only trims the query (Story 3 tasks).
 - Nginx in front of the gateway and JWT authentication (from the project description) are not added yet.
