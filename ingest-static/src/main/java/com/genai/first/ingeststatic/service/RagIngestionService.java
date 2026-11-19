@@ -17,7 +17,6 @@ import org.springframework.ai.reader.pdf.PagePdfDocumentReader;
 import org.springframework.ai.reader.pdf.ParagraphPdfDocumentReader;
 import org.springframework.ai.reader.pdf.config.PdfDocumentReaderConfig;
 import org.springframework.ai.vectorstore.VectorStore;
-import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
@@ -32,10 +31,12 @@ import java.security.NoSuchAlgorithmException;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 @Slf4j
 @Component
@@ -85,9 +86,33 @@ public class RagIngestionService {
             log.info("force-rebuild=true -> every PDF is re-ingested, even if unchanged");
         }
         Map<IngestResult, Integer> results = new java.util.EnumMap<>(IngestResult.class);
+        Set<String> activeDocIds = new HashSet<>();
         for (var pdfResource : pdfResources) {
+            var filename = pdfResource.getFilename();
+            if (filename != null) {
+                activeDocIds.add(DocumentIds.docId(filename));
+            }
             results.merge(ingest(pdfResource), 1, Integer::sum);
         }
+
+        // Story 1, Task 3: Delete process - remove chunks for files removed from resources
+        Set<String> storedDocIds = chunkStore.findAllDocIds();
+        for (var storedDocId : storedDocIds) {
+            if (!activeDocIds.contains(storedDocId)) {
+                log.info("Document doc_id={} no longer exists in resources -> deleting all chunks", storedDocId);
+                long deleted = chunkStore.delete(storedDocId);
+                if (deleted > 0) {
+                    results.merge(IngestResult.DELETED, 1, Integer::sum);
+                }
+            }
+        }
+
+        // Check for orphaned vectors across the collection and clean them up
+        long cleanedOrphans = chunkStore.deleteOrphanedVectors(activeDocIds);
+        if (cleanedOrphans > 0) {
+            log.warn("Detected and cleaned up {} orphaned vector(s) from Qdrant", cleanedOrphans);
+        }
+
         log.info("Ingestion finished for {} PDF(s): {} (chunk size={} tokens, overlap={} tokens, embedding model={})",
                 pdfResources.length, results, textSplitter.getChunkSize(), textSplitter.getOverlap(), embeddingModel);
     }
@@ -150,14 +175,62 @@ public class RagIngestionService {
         return embedded;
     }
 
-    public void deleteBySource(String source) {
+    /**
+     * Deletes all chunks associated with the given doc_id (Story 1, Task 3).
+     * Performs a check for orphaned vectors and throws RagException if any remain.
+     *
+     * @param docId stable document identifier
+     * @return number of chunks deleted
+     */
+    public long deleteByDocId(String docId) {
+        Objects.requireNonNull(docId, "docId must not be null");
         try {
-            var b = new FilterExpressionBuilder();
-            vectorStore.delete(b.eq(RagConstants.SOURCE, source).build());
-            log.info("Deleted source: {} from vector store", source);
+            long deletedCount = chunkStore.delete(docId);
+            log.info("Deleted document doc_id={} ({} chunks removed, verified 0 orphaned vectors)",
+                    docId, deletedCount);
+            return deletedCount;
         } catch (Exception e) {
-            throw new RagException("Error deleting source: " + source + " from vector store!", e);
+            log.error("Failed to delete document doc_id={}: {}", docId, e.getMessage(), e);
+            throw e instanceof RagException re ? re : new RagException("Could not delete document " + docId, e);
         }
+    }
+
+    /**
+     * Deletes all chunks associated with the given source file name by its doc_id (Story 1, Task 3).
+     *
+     * @param source file name of the document
+     * @return number of chunks deleted
+     */
+    public long deleteBySource(String source) {
+        Objects.requireNonNull(source, "source must not be null");
+        return deleteByDocId(DocumentIds.docId(source));
+    }
+
+    /**
+     * Checks if any orphaned vectors exist for a given doc_id.
+     * Throws RagException if orphaned vectors are detected.
+     */
+    public void checkForOrphanedVectors(String docId) {
+        long count = chunkStore.count(docId);
+        if (count > 0) {
+            throw new RagException("Orphaned vectors detected: " + count + " vector(s) still remain for doc_id=" + docId);
+        }
+    }
+
+    /**
+     * Finds point IDs of any orphaned vectors in the store that do not belong to active PDF resources.
+     */
+    public List<String> findOrphanedVectors() {
+        var pdfResources = getResources();
+        Set<String> activeDocIds = new HashSet<>();
+        if (pdfResources != null) {
+            for (var r : pdfResources) {
+                if (r.getFilename() != null) {
+                    activeDocIds.add(DocumentIds.docId(r.getFilename()));
+                }
+            }
+        }
+        return chunkStore.findOrphanedVectorIds(activeDocIds);
     }
 
     private Resource[] getResources() {

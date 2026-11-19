@@ -18,8 +18,11 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /**
  * Qdrant implementation of {@link ChunkStore}.
@@ -109,6 +112,148 @@ public class QdrantChunkStore implements ChunkStore {
         } catch (Exception e) {
             throw new RagException("Could not replace document " + docId + " in Qdrant", e);
         }
+    }
+
+    @Override
+    public long delete(String docId) {
+        var existing = find(docId);
+        if (existing.isEmpty()) {
+            log.info("No chunks found in Qdrant for doc_id={}", docId);
+            return 0;
+        }
+        int expectedDeletedCount = existing.get().chunkCount();
+
+        var filter = Points.Filter.newBuilder()
+                .addMust(ConditionFactory.matchKeyword(RagConstants.DOC_ID, docId))
+                .build();
+        var delete = Points.PointsUpdateOperation.newBuilder()
+                .setDeletePoints(Points.PointsUpdateOperation.DeletePoints.newBuilder()
+                        .setPoints(Points.PointsSelector.newBuilder().setFilter(filter).build())
+                        .build())
+                .build();
+
+        try {
+            qdrantClient.batchUpdateAsync(collectionName, List.of(delete)).get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RagException("Interrupted while deleting document " + docId, e);
+        } catch (Exception e) {
+            throw new RagException("Could not delete document " + docId + " from Qdrant", e);
+        }
+
+        // Check for orphaned vectors: verify no chunks remain for this docId
+        long orphanedCount = count(docId);
+        if (orphanedCount > 0) {
+            throw new RagException("Orphaned vectors detected: " + orphanedCount +
+                    " vector(s) still remain for doc_id=" + docId + " after deletion");
+        }
+        log.info("Successfully deleted {} chunk(s) for doc_id={}, 0 orphaned vectors remaining",
+                expectedDeletedCount, docId);
+        return expectedDeletedCount;
+    }
+
+    @Override
+    public long count(String docId) {
+        var request = Points.ScrollPoints.newBuilder()
+                .setCollectionName(collectionName)
+                .setFilter(Points.Filter.newBuilder()
+                        .addMust(ConditionFactory.matchKeyword(RagConstants.DOC_ID, docId))
+                        .build())
+                .setLimit(SCROLL_LIMIT)
+                .setWithPayload(WithPayloadSelectorFactory.enable(false))
+                .build();
+        try {
+            return qdrantClient.scrollAsync(request).get().getResultList().size();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RagException("Interrupted while counting chunks for doc_id=" + docId, e);
+        } catch (Exception e) {
+            throw new RagException("Could not count chunks for doc_id=" + docId + " from Qdrant", e);
+        }
+    }
+
+    @Override
+    public Set<String> findAllDocIds() {
+        var request = Points.ScrollPoints.newBuilder()
+                .setCollectionName(collectionName)
+                .setLimit(SCROLL_LIMIT)
+                .setWithPayload(WithPayloadSelectorFactory.include(List.of(RagConstants.DOC_ID)))
+                .build();
+        List<Points.RetrievedPoint> points;
+        try {
+            points = qdrantClient.scrollAsync(request).get().getResultList();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RagException("Interrupted while reading doc_ids from Qdrant", e);
+        } catch (Exception e) {
+            throw new RagException("Could not read doc_ids from Qdrant", e);
+        }
+        return points.stream()
+                .map(p -> p.getPayloadMap().get(RagConstants.DOC_ID))
+                .filter(Objects::nonNull)
+                .map(JsonWithInt.Value::getStringValue)
+                .filter(s -> s != null && !s.isBlank())
+                .collect(Collectors.toSet());
+    }
+
+    @Override
+    public List<String> findOrphanedVectorIds(Set<String> activeDocIds) {
+        var request = Points.ScrollPoints.newBuilder()
+                .setCollectionName(collectionName)
+                .setLimit(SCROLL_LIMIT)
+                .setWithPayload(WithPayloadSelectorFactory.include(List.of(RagConstants.DOC_ID)))
+                .build();
+        List<Points.RetrievedPoint> points;
+        try {
+            points = qdrantClient.scrollAsync(request).get().getResultList();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RagException("Interrupted while searching for orphaned vectors in Qdrant", e);
+        } catch (Exception e) {
+            throw new RagException("Could not search for orphaned vectors in Qdrant", e);
+        }
+        List<String> orphanedIds = new ArrayList<>();
+        for (var point : points) {
+            var val = point.getPayloadMap().get(RagConstants.DOC_ID);
+            String docId = val != null ? val.getStringValue() : null;
+            if (docId == null || docId.isBlank() || !activeDocIds.contains(docId)) {
+                orphanedIds.add(point.getId().getUuid());
+            }
+        }
+        return orphanedIds;
+    }
+
+    @Override
+    public long deleteOrphanedVectors(Set<String> activeDocIds) {
+        List<String> orphanedIds = findOrphanedVectorIds(activeDocIds);
+        if (orphanedIds.isEmpty()) {
+            return 0;
+        }
+        List<Points.PointId> pointIds = orphanedIds.stream()
+                .map(id -> PointIdFactory.id(UUID.fromString(id)))
+                .toList();
+        var filter = Points.Filter.newBuilder()
+                .addMust(ConditionFactory.hasId(pointIds))
+                .build();
+        var delete = Points.PointsUpdateOperation.newBuilder()
+                .setDeletePoints(Points.PointsUpdateOperation.DeletePoints.newBuilder()
+                        .setPoints(Points.PointsSelector.newBuilder().setFilter(filter).build())
+                        .build())
+                .build();
+        try {
+            qdrantClient.batchUpdateAsync(collectionName, List.of(delete)).get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RagException("Interrupted while deleting orphaned vectors", e);
+        } catch (Exception e) {
+            throw new RagException("Could not delete orphaned vectors from Qdrant", e);
+        }
+        var remaining = findOrphanedVectorIds(activeDocIds);
+        if (!remaining.isEmpty()) {
+            throw new RagException("Orphaned vectors still detected after deletion: " + remaining.size());
+        }
+        log.info("Deleted {} orphaned vector(s) from Qdrant", orphanedIds.size());
+        return orphanedIds.size();
     }
 
     private int version(Points.RetrievedPoint point) {
