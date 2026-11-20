@@ -53,7 +53,13 @@ public class QdrantChunkStore implements ChunkStore {
                         .addMust(ConditionFactory.matchKeyword(RagConstants.DOC_ID, docId))
                         .build())
                 .setLimit(SCROLL_LIMIT)
-                .setWithPayload(WithPayloadSelectorFactory.include(List.of(RagConstants.VERSION, RagConstants.CHECKSUM)))
+                .setWithPayload(WithPayloadSelectorFactory.include(List.of(
+                        RagConstants.VERSION,
+                        RagConstants.CHECKSUM,
+                        RagConstants.SOURCE,
+                        RagConstants.EMBEDDING_MODEL,
+                        RagConstants.INGESTED_AT,
+                        RagConstants.UPDATED_AT)))
                 .build();
         List<Points.RetrievedPoint> points;
         try {
@@ -70,9 +76,24 @@ public class QdrantChunkStore implements ChunkStore {
 
         int latestVersion = points.stream().mapToInt(this::version).max().orElse(RagConstants.INITIAL_VERSION);
         var latest = points.stream().filter(p -> version(p) == latestVersion).toList();
-        var checksum = latest.get(0).getPayloadMap().getOrDefault(RagConstants.CHECKSUM,
-                ValueFactory.value("")).getStringValue();
-        return Optional.of(new StoredDocument(docId, latestVersion, checksum, latest.size()));
+        var payload = latest.get(0).getPayloadMap();
+        var checksum = payload.getOrDefault(RagConstants.CHECKSUM, ValueFactory.value("")).getStringValue();
+        var source = payload.containsKey(RagConstants.SOURCE) ? payload.get(RagConstants.SOURCE).getStringValue() : null;
+        var model = payload.containsKey(RagConstants.EMBEDDING_MODEL) ? payload.get(RagConstants.EMBEDDING_MODEL).getStringValue() : null;
+        var ingestedAt = payload.containsKey(RagConstants.INGESTED_AT) ? payload.get(RagConstants.INGESTED_AT).getStringValue()
+                : (payload.containsKey(RagConstants.UPDATED_AT) ? payload.get(RagConstants.UPDATED_AT).getStringValue() : null);
+
+        return Optional.of(new StoredDocument(docId, source, latestVersion, checksum, latest.size(), model, ingestedAt));
+    }
+
+    @Override
+    public List<StoredDocument> findAll() {
+        var docIds = findAllDocIds();
+        List<StoredDocument> result = new ArrayList<>(docIds.size());
+        for (var docId : docIds) {
+            find(docId).ifPresent(result::add);
+        }
+        return result;
     }
 
     @Override

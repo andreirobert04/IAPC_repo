@@ -42,8 +42,21 @@ public class InMemoryChunkStore implements ChunkStore {
         }
         int latest = docs.stream().mapToInt(this::version).max().orElseThrow();
         var latestDocs = docs.stream().filter(d -> version(d) == latest).toList();
-        return Optional.of(new StoredDocument(docId, latest,
-                String.valueOf(latestDocs.get(0).getMetadata().get(RagConstants.CHECKSUM)), latestDocs.size()));
+        var firstMeta = latestDocs.get(0).getMetadata();
+        var checksum = String.valueOf(firstMeta.getOrDefault(RagConstants.CHECKSUM, ""));
+        var source = (String) firstMeta.get(RagConstants.SOURCE);
+        var model = (String) firstMeta.get(RagConstants.EMBEDDING_MODEL);
+        var ingestedAt = (String) firstMeta.getOrDefault(RagConstants.INGESTED_AT, firstMeta.get(RagConstants.UPDATED_AT));
+        return Optional.of(new StoredDocument(docId, source, latest, checksum, latestDocs.size(), model, ingestedAt));
+    }
+
+    @Override
+    public List<StoredDocument> findAll() {
+        var docIds = findAllDocIds();
+        return docIds.stream()
+                .map(this::find)
+                .flatMap(Optional::stream)
+                .toList();
     }
 
     @Override

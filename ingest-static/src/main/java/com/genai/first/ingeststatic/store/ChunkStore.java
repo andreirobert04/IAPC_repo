@@ -5,14 +5,20 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * Storage of document chunks (Story 1, Tasks 2 + 3). Implemented with Qdrant; tests use an in-memory version.
+ * Storage of document chunks (Story 1, Tasks 2 + 3 + 4). Implemented with Qdrant; tests use an in-memory version.
  */
 public interface ChunkStore {
 
     /**
-     * Current version, checksum and chunk count of a document, or empty if it is not stored yet.
+     * Current version, checksum, chunk count, model and ingestion timestamp of a document,
+     * or empty if it is not stored yet.
      */
     Optional<StoredDocument> find(String docId);
+
+    /**
+     * Returns all stored documents currently in the vector store.
+     */
+    List<StoredDocument> findAll();
 
     /**
      * Replaces all chunks of a document with the given ones in a single request:
