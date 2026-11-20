@@ -2,14 +2,19 @@ package com.genai.first.ingeststatic.controller;
 
 import com.genai.first.ingeststatic.config.data.RagConfigData;
 import com.genai.first.ingeststatic.exception.RagException;
+import com.genai.first.ingeststatic.manifest.IngestionManifest;
+import com.genai.first.ingeststatic.manifest.ManifestEntry;
 import com.genai.first.ingeststatic.service.ChunkInspectionService;
+import com.genai.first.ingeststatic.service.IngestResult;
 import com.genai.first.ingeststatic.service.RagIngestionService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -86,5 +91,47 @@ public class IngestionController {
     public Map<String, Object> checkOrphans() {
         var orphanIds = ragIngestionService.findOrphanedVectors();
         return Map.of("orphaned_vectors_count", orphanIds.size(), "orphaned_vector_ids", orphanIds);
+    }
+
+    /**
+     * Full ingestion manifest: active documents and chronological history log of what was ingested,
+     * when, and with which embedding model version (Story 1, Task 4).
+     * Example: GET /api/ingestion/manifest
+     */
+    @GetMapping("/manifest")
+    public IngestionManifest getManifest() {
+        return ragIngestionService.getManifest();
+    }
+
+    /**
+     * Ingestion manifest entry for a specific document by doc_id (Story 1, Task 4).
+     * Example: GET /api/ingestion/manifest/{docId}
+     */
+    @GetMapping("/manifest/{docId}")
+    public ResponseEntity<ManifestEntry> getManifestForDoc(@PathVariable String docId) {
+        return ragIngestionService.getManifestForDoc(docId)
+                .map(ResponseEntity::ok)
+                .orElseGet(() -> ResponseEntity.notFound().build());
+    }
+
+    /**
+     * Re-indexes documents with the current embedding model version (Story 1, Task 4).
+     * Can re-index all documents or a specific one by docId / source.
+     * Example: POST /api/ingestion/reindex  or  ?source=access_control_matrix.pdf  or  ?docId=...
+     */
+    @PostMapping("/reindex")
+    public Map<String, Object> reindex(@RequestParam(required = false) String docId,
+                                       @RequestParam(required = false) String source) {
+        if (docId != null && !docId.isBlank()) {
+            IngestResult res = ragIngestionService.reindexByDocId(docId);
+            return Map.of("reindexed_count", res == IngestResult.REINDEXED ? 1 : 0, "results", Map.of(docId, res));
+        }
+        if (source != null && !source.isBlank()) {
+            IngestResult res = ragIngestionService.reindexBySource(source);
+            return Map.of("reindexed_count", res == IngestResult.REINDEXED ? 1 : 0, "results", Map.of(source, res));
+        }
+        Map<String, IngestResult> allResults = ragIngestionService.reindexAll();
+        long successCount = allResults.values().stream().filter(r -> r == IngestResult.REINDEXED).count();
+        return Map.of("reindexed_count", successCount, "results", allResults);
     }
 }

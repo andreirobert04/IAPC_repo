@@ -19,6 +19,7 @@ public final class RagConstants {
 
     public static final String DOC_TYPE = "doc_type";
     public static final String UPDATED_AT = "updated_at";
+    public static final String INGESTED_AT = "ingested_at";
     public static final String UNKNOWN = "UNKNOWN";
 
     // metadata key set by Spring AI's PDF readers

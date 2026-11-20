@@ -105,6 +105,7 @@ Every PDF in `./resources` is read page by page, split into chunks and stored in
 | `chunk_index` | position of the chunk in the whole document, from 0 |
 | `checksum` | SHA-256 of the file |
 | `embedding_model` | model used for the embedding |
+| `ingested_at` | ISO-8601 timestamp of when the chunk was ingested |
 
 **No duplicates:** the Qdrant point id is a UUID derived from `doc_id + version + chunk_index`, so ingesting the same file again overwrites the same points.
 
@@ -169,6 +170,39 @@ curl http://localhost:8080/ingest-static/api/ingestion/orphans
 ```
 
 **Tests:** `RagIngestionDeleteTest` (delete by `doc_id`, delete by source, non-existent doc handling, failure handling, simulated orphan detection and exception, startup reconciliation for removed files, orphaned vectors purge).
+
+### Task 4 – Ingestion manifest and re-index support
+
+Every ingestion, update, re-index, and delete event is tracked in an ingestion manifest log recording **what** was ingested, **when** (ISO-8601 timestamp), and with **which embedding model version**.
+
+| Event | Result | What happens |
+|---|---|---|
+| initial ingestion | `NEW` | ingested as version 1; recorded in manifest with timestamp and embedding model |
+| same checksum & same model | `UNCHANGED` | skipped without calling embedding model; recorded as `UNCHANGED` in history |
+| model version changed | `REINDEXED` | detected embedding model mismatch; re-embeds all chunks with new model version without changing document version |
+| explicit re-index request | `REINDEXED` | forces re-chunking and re-embedding with current model via API |
+| checksum changed | `UPDATED` | new version replaces old chunks; recorded in manifest with incremented version |
+| file removed / deleted | `DELETED` | chunks purged; recorded as `DELETED` in manifest history |
+
+**Endpoints:**
+```bash
+# get full manifest (active documents + chronological audit log)
+curl http://localhost:8080/ingest-static/api/ingestion/manifest
+
+# get manifest for a specific document
+curl http://localhost:8080/ingest-static/api/ingestion/manifest/<doc_id>
+
+# re-index all documents with current embedding model
+curl -X POST http://localhost:8080/ingest-static/api/ingestion/reindex
+
+# re-index a specific document by source name
+curl -X POST "http://localhost:8080/ingest-static/api/ingestion/reindex?source=access_control_matrix.pdf"
+
+# re-index a specific document by doc_id
+curl -X POST "http://localhost:8080/ingest-static/api/ingestion/reindex?docId=<doc_id>"
+```
+
+**Tests:** `RagIngestionManifestTest` (manifest logging on NEW/UNCHANGED/UPDATED/REINDEXED/DELETED, automatic re-index on model version mismatch, explicit re-index by doc_id/source/all, manifest snapshot vs event history, doc-specific manifest lookup).
 
 ## Known limitations / next tasks
 
